@@ -52,6 +52,17 @@ export MODEL_PROXY_URL=http://localhost:4000
 - 在 https://huggingface.co/datasets/google/physical-engineerings-last-exam 页面申请访问（gated 数据集）。
 - 拿一个 read token，设 `HF_TOKEN`（或跑一次 `uv run hf auth login`）。
 
+## 8GB Mac 方案（2026-11-19 更新：Mac 只有 8GB，不开云主机）
+
+**结论：29 个任务跑不全，但能跑一部分，而且部分提交是允许的。**
+
+- 跑不全的原因：整套 dev 集按最大任务配额要 6 CPU + 16.25GB 内存一个 slot，rubric 任务的镜像约 17GB；8GB Mac 分给 Docker 的只有约 6GB。
+- 能跑的：小的 `checks` 任务（12 个，纯文件输出，如 solution.py / submission.zip，不用 17GB 世界镜像）。最小任务规格是 2 CPU / 4GB，`kit check` 的 smoke 测试也是这个规格；实际内存占用通常远小于上限，值得一试。
+- 跑不了的：14 个 `rubric` 任务（要世界镜像 + 大内存）。
+- 部分提交合法：官方 `docs/artifacts.md` 明确 `eval/run.py --tasks <id>` 跑子集就可以；dev 分是 29 个任务的均分，缺的任务记 0；只有**全部**任务都没有可用 artifacts 时提交才会被拒收。Stage 1 只看 Writeup，Stage 2 是 Google 在他们机器上跑 56 个隐藏任务，不受你的 Mac 限制。所以策略是：Mac 上把能跑的 checks 任务跑完，rubric 的先空着，先交一个能进 Stage 1 的版本。
+- 本地验证不用 GCP：临时把 `submission.yaml` 的 `model_api` 改成 `gemini/gemini-3.8-flash`，配 `GEMINI_API_KEY`（Google AI Studio 免费申请），走 `local-validate` 分支，**不要提交到 main**。但注意：最终提交的 `artifacts/` 必须用提交的那个 `google-cloud` 模型实际跑出来，所以验证跑通后，checks 任务还要用 `google-cloud/gemini-3.8-flash` 重跑一次。那一步需要 model proxy（GCP），或者折中办法：本地起 LiteLLM proxy，用 Gemini API key 做后端、名字仍报 `google-cloud/gemini-3.8-flash`（官方文档说任何能提供这些模型名的 OpenAI 兼容 proxy 都行；免费 key 有速率限制，跑得慢，429 会自动重试）。
+- 一键安装脚本：`scripts/setup-mac.sh`（装 uv + Harbor，clone 两个仓库，生成 `local.env` 模板；Docker Desktop 需手动装并把内存拉到最大，磁盘至少留 20GB）。
+
 ## 跑通全链路的命令顺序（在能上网、有 Docker 的机器上）
 
 ```bash
@@ -108,15 +119,16 @@ git -C ../my-harness add -A && git -C ../my-harness commit -m "harness and dev a
 - 本仓库内**没有任何密钥**：`.gitignore` 已排除 `*.env`、`.venv/`、`runs/`。`MODEL_PROXY_KEY`、`HF_TOKEN`、`GEMINI_API_KEY` 一律放 `local.env`（仓库外），绝不提交。
 - 8 个可用模型：`google-cloud/gemini-4-argon`、`gemini-3.8-flash`、`gemini-3.1-pro-preview`、`gemma-4-26b`、`claude-opus-5-5`、`gpt-oss-120b`、`glm-5.2`、`llama-4-maverick`。
 
-## 下一步清单
+## 下一步清单（8GB Mac 路线）
 
-- [ ] Mac 上装 Docker Desktop + uv + Harbor
-- [ ] GCP 项目开 Vertex AI，起 model proxy
-- [ ] HF 数据集申请 + token
-- [ ] `kit check` 跑到 ready to submit
-- [ ] 单任务试跑，记下 results.json 的 token 数，算一轮成本
-- [ ] 全量 29 任务跑完，生成 artifacts/
-- [ ] （可选）换第二个模型跑 dev 集，做跨模型对比图
+- [ ] Mac 上跑 `scripts/setup-mac.sh`（先手动装 Docker Desktop，内存拉到最大，磁盘留 20GB 以上）
+- [ ] HF 数据集申请 + token，填进 `kaggle-ple/local.env`
+- [ ] Google AI Studio 申请 Gemini API key，填进 `local.env`（本地验证用）
+- [ ] `local-validate` 分支：`model_api` 临时改 `gemini/gemini-3.8-flash`，`kit check` 跑到 model 阶段通过
+- [ ] 单任务试跑 `roof-deck-design`，记下 results.json 的 token 数，算一轮成本
+- [ ] 把能跑的 checks 任务逐个跑完（12 个 checks + 3 个 checks-judge），生成 artifacts/
+- [ ] 最终提交前：用 `google-cloud/gemini-3.8-flash`（model proxy，GCP 或 LiteLLM+Gemini key 后端）重跑一遍已跑的任务，生成提交用的 artifacts/
+- [ ] `kit artifacts` + `kit check` 确认 ready to submit，推 GitHub
 - [ ] 写 Writeup（2000 字 + 3 图），Kaggle 提交
 - [ ] 2027-01-05 前最终确认提交
 
