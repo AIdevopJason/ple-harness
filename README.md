@@ -1,47 +1,107 @@
-# minimal: a short tool-calling loop on Gemini 3.8 Flash
+# my-harness: full-featured custom harness on Gemini 3.8 Flash
 
-The smallest complete harness in this repository (under 250 lines of code in
-`serve.py`, built on `taskbridge.py`) and the easiest starting point for a
-custom agent. It calls the Google-sponsored `google-cloud/gemini-3.8-flash`
-model, so it needs no API key.
+> Based on the official `custom-openai` sample from `google-research/ple`
+> (copied 2026-11-19). Only `submission.yaml` changed: model switched from
+> `google-cloud/gpt-oss-120b` to `google-cloud/gemini-3.8-flash`, and
+> `COMPACT_AT_TOKENS` raised to 400000 for Flash's larger window. See
+> `HANDOVER.md` for why this base was chosen and what is still untested.
 
-## How it works
-
-`solve(session)` in `serve.py` implements the entire agent loop:
-
-1. Sends a concise system prompt, the task instruction, and three tools (`bash`, `read_file`, and `write_file`).
-2. Executes each tool call inside the task container via `session.exec`,
-   `session.read_file`, or `session.write_file`, and returns the output to the
-   model along with the remaining task time in minutes.
-3. When the model responds without calling a tool, that response becomes
-   `final_message`. If a response is empty or truncated at the token limit, the
-   loop nudges the model to continue (up to `MAX_NUDGES = 3` times) and
-   concatenates truncated replies.
-4. Four minutes before the task deadline (`WRAP_UP_SEC`), any in-flight model call is cancelled and the model is asked for its final summary with `tool_choice="none"`.
-5. Transient API failures (`429`, `5xx`, or dropped connections) are logged and retried with backoff (`RETRY_WAITS`, 5 seconds to 2 minutes, stopping before the wrap-up deadline) without polluting the conversation history. If the endpoint returns a `400` context-length error, the older half of long tool outputs is trimmed to the first 1,000 characters (`CUT_KEEP`) and the call is retried.
-
-Every non-empty text response updates `session.final_message` so `taskbridge`
-still sends the latest summary if the task is cancelled. Token usage is reported
-after each call via `session.usage`. Assistant messages are appended via
-`model_dump()` so provider-specific fields (like Gemini's thought signatures)
-are preserved across turns.
+The most complete reference harness in this repository. It talks to the model via the OpenAI Chat Completions API (the Responses API for OpenAI's GPT-6 models) using `MODEL_BASE_URL`, `MODEL_API_KEY`, and `MODEL_NAME`, so the exact same code runs against any `google-cloud/<id>` model (by default `google-cloud/gpt-oss-120b`) and, for local runs, against OpenAI or a model you serve ([`local-model`](../local-model/) uses `serve.py` unchanged). For a stripped-down version of the core loop in under 250 lines, see [`minimal`](../minimal/).
 
 | File | Purpose |
 |---|---|
-| `serve.py` | Agent loop and tool definitions |
+| `serve.py` | Agent loop, container and MCP tools, context compaction, and deadline management |
 | `taskbridge.py` | Serve protocol implementation (shared across Python samples) |
 | `requirements.txt` | Pinned `openai` and `websockets` dependencies |
 | `submission.yaml` | Model declaration, build command, and server startup command |
 
-## Customizing
+## How it works
 
-Because the OpenAI SDK reads `OPENAI_BASE_URL` and `OPENAI_API_KEY` (which the evaluator sets for every model), you can switch to any model in [`docs/models.md`](../../docs/models.md) just by changing `model_api` in `submission.yaml`.
+### Tools and MCP discovery
+The model gets four core tools that execute inside the task container: `bash`,
+`read_file`, `write_file` (with `append` support for large files), and
+`edit_file` (exact string replacement).
 
-- For models with smaller context windows, set a lower `MAX_OUTPUT_TOKENS` (default `32000`) under `env:` in `submission.yaml`.
-- To try it locally without a Google Cloud project for `kit/model_proxy`, set
-  `model_api: gemini/gemini-3.8-flash` and put `GEMINI_API_KEY` in your
-  environment or `--env-file`. That entry runs locally only; submit it with a
-  `google-cloud/<id>` model.
-- Always generate your `artifacts/` with the same `model_api` you submit.
+When a task provides MCP servers (documents, spreadsheets, email, CAD, etc.),
+small catalogs (up to 128 total tools and under 40,000 characters of schema
+JSON) are exposed directly as function tools. When the catalog is larger, the
+prompt lists the available MCP servers and provides `mcp_find` and `mcp_call`
+tools so the model can search and invoke them on demand without bloating every
+prompt.
 
-To keep the code minimal, this starter omits task MCP tools (so `kit check` prints a warning at the `mcp` stage), streaming, and compaction into notes (it only cuts old tool results once the context is full). See [`custom-openai`](../custom-openai/) for a full harness with those features, or [`plan-verify`](../plan-verify/) for a multi-role planner/worker/verifier loop built on `minimal`.
+### GPT-6 on the Responses API
+In a local run on `openai/<model>`, OpenAI's GPT-6 models (such as
+`gpt-6-astra`) reject requests that combine function tools with
+`reasoning_effort` on `/v1/chat/completions`, so `serve.py` calls them through
+the Responses API at `max` effort (and automatically falls back to the Responses
+API if any other model returns that `400`). The harness keeps its internal
+message history in Chat Completions format and converts it on each call, passing
+`store: false` and round-tripping output items (including encrypted reasoning
+items) across turns. All other models, including `local-model`, use Chat
+Completions.
+
+### Streaming and deadline handling
+Every model call is streamed. Tool calls execute and return results along with
+the remaining time from `limits.agent_timeout_sec`. If a response is truncated
+at the token limit or empty, the harness prompts the model to continue and
+stitches truncated replies together.
+
+`serve.py` caps every `bash` command's timeout so it ends before the wrap-up
+window. Three minutes before the task deadline, it interrupts any in-flight
+stream and asks the model for its final summary. If time runs out before the summary finishes,
+whatever text has streamed so far is sent as `final_message`.
+
+### Retries and context compaction
+Assistant messages preserve provider-specific fields (such as Gemini thought
+signatures and Claude signed thinking blocks), and Claude calls mark the system
+prompt and newest message with `cache_control` for prompt caching. Timeouts,
+`429` rate limits, `5xx` errors, dropped connections, mid-stream errors, and
+streams that end without a finish reason are retried up to five times with
+backoff (`RETRY_WAITS`, 5 seconds to 2 minutes, stopping before the wrap-up
+window) without adding failed partial responses to the conversation. If an
+endpoint rejects `max_completion_tokens`, the harness falls back to `max_tokens`
+or lowers the requested limit automatically.
+
+To keep long runs within the context window, large tool outputs are head/tail
+truncated immediately. Once the prompt exceeds `COMPACT_AT_TOKENS` (or if the
+endpoint returns a context-length error), the harness first trims older tool
+outputs that the model has already seen. If the conversation is still too large,
+it asks the model to summarize older turns into concise notes while preserving
+Claude's signed thinking blocks on the recent turns kept in history.
+
+## Configuring the model
+
+```yaml
+model_api: google-cloud/gpt-oss-120b
+```
+
+A `google-cloud/<id>` entry contains no API key; the harness reads the key from
+environment variables. To switch models, set `model_api` to another
+`google-cloud/<id>` model. For a local run on your own OpenAI key, set
+`model_api: openai/<model>` and put `OPENAI_API_KEY` in your environment or
+`--env-file`; such an entry is not accepted for submission
+([`docs/models.md`](../../docs/models.md#your-own-model-local-runs-only)).
+
+Optional settings under `env:` in `submission.yaml`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `MAX_OUTPUT_TOKENS` | `32000` | Max completion tokens per call (lowered automatically if the endpoint enforces a smaller cap). For GPT 6 Astra in a local run, whose reasoning counts toward it, set its maximum, `128000` |
+| `COMPACT_AT_TOKENS` | `150000` | Prompt token threshold that triggers context compaction (this sample sets `90000` for gpt-oss's 131,072-token window; raise it when you switch to a model with a larger one) |
+| `REASONING_EFFORT` | the model's highest | Reasoning level sent with each call: `max` for Claude, GLM, GPT-6 and DeepSeek-V4, `high` for the others |
+
+## Debugging on your host
+
+To run `serve.py` directly on your host outside Docker:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+MODEL_BASE_URL=http://localhost:4000/v1 MODEL_API_KEY=$MODEL_PROXY_KEY MODEL_NAME=gpt-oss-120b PORT=8765 \
+    .venv/bin/python serve.py
+```
+
+Then connect `eval/run.py` to it from the competition repository:
+
+```bash
+uv run python eval/run.py --url ws://127.0.0.1:8765 --name custom-openai --tasks data-center-site-model
+```

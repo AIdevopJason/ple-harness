@@ -12,9 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: minimal
+name: my-harness
 model_api: google-cloud/gemini-3.8-flash
 install: >-
   uv venv --python 3.12 /opt/harness/venv
   && uv pip install --python /opt/harness/venv/bin/python -r {src}/requirements.txt
 serve: /opt/harness/venv/bin/python {src}/serve.py
+# gemini-3.8-flash has a large context window: compact at 400,000, leaving room
+# for the default 32,000-token reply. The harness also compacts on its own if
+# the endpoint reports a context-length error, so this is safe to tune after
+# the first runs.
+env:
+  COMPACT_AT_TOKENS: "400000"

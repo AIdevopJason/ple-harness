@@ -12,10 +12,14 @@ Google - Agent Harness on Physical-Engineering's Last Exam（PLE）：做一个�
 
 ## 这个仓库是什么
 
-- 来源：`google-research/ple` 的 `sample_submissions/minimal` 原样拷出（官方推荐的从零写 harness 的起点）。
+- 来源：`google-research/ple` 的 `sample_submissions/custom-openai` 原样拷出（官方最完整的参考 harness，2026-11-19 从 minimal 换过来，原因见下）。
 - 模型：`google-cloud/gemini-3.8-flash`（最便宜的赞助模型，先跑通链路用；换模型只改 `submission.yaml` 里的 `model_api`）。
-- 结构：`serve.py`（不到 250 行：一个模型 + bash/read_file/write_file 三个工具 + 循环）+ `taskbridge.py`（WebSocket 协议层）+ `submission.yaml` + `requirements.txt`。
+- 结构：`serve.py`（1800 行：模型循环 + bash/read_file/write_file/edit_file + 任务 MCP 工具 + 流式 + 上下文压缩 + 截止时间管理）+ `taskbridge.py`（WebSocket 协议层）+ `submission.yaml` + `requirements.txt`。
 - 上游仓库（只读参考，已 clone 在本地，不在本仓库内）：`~/workspace/kaggle-ple`。
+
+### 为什么从 minimal 换成 custom-openai
+
+minimal 只有 bash/read_file/write_file 三个工具，没有 MCP 工具。而 29 个 dev 任务里 12 个 rubric 任务跑在 world 环境里（邮件、文档、表格、CAD 等应用），只能通过任务自带的 MCP 服务器操作——没有 MCP，这批任务基本拿不到分。custom-openai 自带 MCP 发现与调用（工具少时直接暴露，工具多时用 `mcp_find`/`mcp_call` 按需调用），外加上下文压缩（旧对话总结成笔记再丢弃，6 小时长任务必需）和流式 + 截止时间管理。换底座零移植风险（官方 sample，taskbridge 与 minimal 的完全相同），只改了 `submission.yaml`（模型换 Flash，`COMPACT_AT_TOKENS` 提到 400000；harness 遇到上下文超限会自己压缩，不怕设高）。minimal 版仍保留在 git 历史里（commit `71aac2a`）。
 
 ## 已完成（2026-11-19，沙箱内实测）
 
@@ -25,6 +29,7 @@ Google - Agent Harness on Physical-Engineering's Last Exam（PLE）：做一个�
 | `python3 -m py_compile serve.py taskbridge.py` | OK |
 | 装 uv 0.13.9 | OK（沙箱内，`~/.local/bin/uv`） |
 | `uv run python -m kit check ../my-harness`（在 `~/workspace/kaggle-ple` 内跑） | 部分通过：`[PASS] submission.yaml`；`[FAIL] model：MODEL_PROXY_URL, MODEL_PROXY_KEY 未设置`，到此为止 |
+| 底座从 minimal 换成 custom-openai（见上），模型仍为 Flash，`COMPACT_AT_TOKENS` 400000 | `py_compile` OK；`kit check` 仍是 `[PASS] submission.yaml: my-harness: google-cloud/gemini-3.8-flash` + 同一个 model FAIL。**注意：MCP 调用和压缩逻辑只在官方 sample 层面验证过，本仓库的改动（仅 submission.yaml）在真实任务上还没跑过，第一次单任务试跑就是验证。** |
 
 ## 卡住的地方（都需要 Jason 在自己的机器上做，沙箱里做不了）
 
