@@ -63,7 +63,14 @@ export MODEL_PROXY_URL=http://localhost:4000
 - 本地验证不用 GCP：临时把 `submission.yaml` 的 `model_api` 改成 `gemini/gemini-3.8-flash`，配 `GEMINI_API_KEY`（Google AI Studio 免费申请），走 `local-validate` 分支，**不要提交到 main**。但注意：最终提交的 `artifacts/` 必须用提交的那个 `google-cloud` 模型实际跑出来，所以验证跑通后，checks 任务还要用 `google-cloud/gemini-3.8-flash` 重跑一次。那一步需要 model proxy（GCP），或者折中办法：本地起 LiteLLM proxy，用 Gemini API key 做后端、名字仍报 `google-cloud/gemini-3.8-flash`（官方文档说任何能提供这些模型名的 OpenAI 兼容 proxy 都行；免费 key 有速率限制，跑得慢，429 会自动重试）。
 - 一键安装脚本：`scripts/setup-mac.sh`（装 uv + Harbor，clone 两个仓库，生成 `local.env` 模板；Docker Desktop 需手动装并把内存拉到最大，磁盘至少留 20GB）。
 
-## 跑通全链路的命令顺序（在能上网、有 Docker 的机器上）
+## GitHub Actions 跑（2026-11-19 更新：Jason 不想用 Mac 跑）
+
+沙箱没 Docker、资源不够；改走免费 GitHub Actions runner（公开库免费，标准机 4 vCPU / 16GB 内存 / 约 14GB 磁盘），正好够跑小的 checks 任务。工作流：`.github/workflows/ple-dev.yml`，手动触发（Actions > PLE dev run > Run workflow），默认跑 `roof-deck-design` 一个任务。
+
+- 模型：本地验证路线，工作流自动把 `submission.yaml` 的 `model_api` 改成 `gemini/gemini-3.8-flash`，用 `GEMINI_API_KEY`，不用 GCP。提交用的 artifacts 仍须用 `google-cloud` 模型重跑（见 8GB Mac 方案一节）。
+- 需要两个 repo secrets（Settings > Secrets and variables > Actions）：`HF_TOKEN`（HF read token，账号须先在数据集页申请访问）、`GEMINI_API_KEY`（Google AI Studio 免费 key）。值只存在 GitHub，不进代码、不进日志。
+- 只跑 checks / checks-judge 任务：rubric 任务要 17GB 世界镜像，runner 磁盘不够。
+- 跑完结果在 workflow 的 Artifacts 里下载（`ple-run-<号>`，保留 30 天），确认没问题再 commit 进仓库的 `artifacts/`。
 
 ```bash
 # 0. 进上游仓库目录（kit 和 eval 都在里面），harness 在隔壁独立仓库
@@ -104,8 +111,8 @@ git -C ../my-harness add -A && git -C ../my-harness commit -m "harness and dev a
 
 - 你的时间：2–4 周业余，或全职 1–2 周做到可提交。
 - 机器时间：单任务上限 6 小时；29 任务串行最长 174 小时，实际多在 1–2 小时/任务。
-- Token：单任务输入几百万 token（多为缓存命中）+ 输出几十万到一两百万 token；一轮 29 任务输入几千万、输出几百万到上千万；跨模型对比要跑两轮。裁判（17 个 rubric/checks-judge 任务）是小头。
-- 钱（量级参考，按 Opus 级公开价 $5/$25 每百万 token）：Opus 跑一轮约 $1,500–8,000；Flash 便宜约 10 倍。**先拿 Flash 跑 1–3 个任务测出真实单价再决定。**
+- Token：论文实测，单任务累计处理量约 27M token（含每轮重发历史上下文）；Opus 跑一轮 29 任务约 7.8 亿 token、约 30 小时。**先拿 Flash 跑 1 个任务实测 results.json 的 n_input/n_output_tokens 再决定。**
+- 钱（论文实测，2026-11-19 已修正，旧的 $1,500–8,000/轮粗估作废）：Opus 跑一轮约 $498，按中位数成本约 $192；跑三轮全量约 $1,500。Flash 跑一轮约 $74（29 任务 × 约 $2.55/任务，论文里 Flash 在最优 harness 上 28.2%）。最终排名是 performance-cost Pareto，便宜模型跑出够用的分反而占优。
 
 ## 规则红线（违反会取消资格）
 

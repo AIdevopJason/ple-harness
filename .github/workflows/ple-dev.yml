@@ -1,0 +1,87 @@
+# PLE dev run — 免费 GitHub Actions runner 上跑 dev 任务
+#
+# 为什么：8GB Mac 跑不全、沙箱没 Docker；公开仓库的 Actions 是免费的
+# （标准 runner：4 vCPU / 16GB 内存 / 约 14GB 磁盘），正好够跑小的 checks 任务。
+# 模型走本地验证路线 gemini/gemini-3.8-flash + GEMINI_API_KEY，不用 GCP。
+#
+# 前置（repo Settings > Secrets and variables > Actions 里加两个 secrets）：
+#   HF_TOKEN       — Hugging Face read token（账号须先在数据集页申请访问）
+#   GEMINI_API_KEY — Google AI Studio 免费 key
+#
+# 用法：GitHub 仓库页 Actions > PLE dev run > Run workflow，
+# 填 tasks（默认 roof-deck-design，多个用逗号隔开），跑完在 Artifacts 里下载结果。
+# 注意：rubric 任务要 17GB 世界镜像，runner 磁盘不够，只跑 checks / checks-judge 任务。
+
+name: PLE dev run
+
+on:
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: "Task IDs, comma-separated (12 checks tasks max on this runner)"
+        default: "roof-deck-design"
+        required: true
+        type: string
+      model:
+        description: "model_api override"
+        default: "gemini/gemini-3.8-flash"
+        required: false
+        type: string
+
+jobs:
+  dev:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout my-harness
+        uses: actions/checkout@v4
+        with:
+          path: my-harness
+
+      - name: Clone ple upstream
+        run: git clone --depth 1 https://github.com/google-research/ple ple
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install Harbor
+        run: $HOME/.local/bin/uv tool install harbor==0.20.0 --with websockets
+
+      - name: Check runner resources
+        run: |
+          df -h
+          free -g
+          nproc
+          docker info --format '{{.ServerVersion}} CPUs={{.NCPU}} Mem={{.MemTotal}}'
+
+      - name: Configure model and secrets
+        run: |
+          cd my-harness
+          sed -i 's#^model_api: .*#model_api: ${{ inputs.model }}#' submission.yaml
+          grep '^model_api:' submission.yaml
+          cat > ../ple/local.env <<'EOF'
+          HF_TOKEN=${{ secrets.HF_TOKEN }}
+          GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+          EOF
+          echo "local.env written (values masked by Actions)"
+
+      - name: kit check
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd ple && uv run python -m kit check --env-file local.env ../my-harness
+
+      - name: Run tasks
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd ple && uv run python eval/run.py ../my-harness --env-file local.env --tasks "${{ inputs.tasks }}"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ple-run-${{ github.run_number }}
+          path: |
+            my-harness/artifacts
+            ple/runs
+          if-no-files-found: warn
+          retention-days: 30
